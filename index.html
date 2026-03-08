@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Santa Monica Weather — Outdoor Activity Guide</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="SM Weather">
+  <meta name="theme-color" content="#0f1923">
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Santa Monica Weather</h1>
+      <p class="subtitle">Personalized outdoor activity guide</p>
+      <div class="header-buttons">
+        <button id="unit-toggle" class="unit-toggle" onclick="toggleUnit()">Switch to &deg;F</button>
+        <button id="settings-toggle" class="unit-toggle" onclick="toggleSettings()">Settings</button>
+      </div>
+    </header>
+
+    <section id="settings" class="card" hidden>
+      <h2>Activity Thresholds</h2>
+      <p class="settings-note">Set the minimum feels-like temperature for a "great" rating.</p>
+      <div class="settings-grid" id="settings-grid"></div>
+      <div class="settings-actions">
+        <button class="btn-reset" onclick="resetThresholds()">Reset to defaults</button>
+      </div>
+    </section>
+
+    <section id="current" class="card current-weather">
+      <div class="loading" id="loading">Loading weather data&hellip;</div>
+      <div class="current-grid" id="current-grid" hidden>
+        <div class="temp-block">
+          <span class="temp-value" id="temp">--</span>
+          <span class="temp-unit" id="temp-unit">&deg;C</span>
+          <p class="weather-desc" id="weather-desc">--</p>
+        </div>
+        <div class="details-block">
+          <div class="detail"><span class="label">Feels like</span><span id="feels-like">--</span></div>
+          <div class="detail"><span class="label">Wind</span><span id="wind">--</span></div>
+          <div class="detail"><span class="label">Gusts</span><span id="gusts">--</span></div>
+          <div class="detail"><span class="label">Humidity</span><span id="humidity">--</span></div>
+          <div class="detail"><span class="label">UV Index</span><span id="uv">--</span></div>
+        </div>
+        <div class="sun-block">
+          <div class="detail"><span class="label">Sunrise</span><span id="sunrise">--</span></div>
+          <div class="detail"><span class="label">Sunset</span><span id="sunset">--</span></div>
+          <div class="detail"><span class="label">Backyard sun</span><span id="sun-status">--</span></div>
+          <div class="detail"><span class="label">Sun windows</span><span id="sun-windows">--</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="activities" class="card" hidden>
+      <h2>Activity Recommendations</h2>
+      <div id="activity-list" class="activity-list"></div>
+    </section>
+
+    <section id="tides" class="card" hidden>
+      <h2>Tide Conditions</h2>
+      <div id="tide-info" class="tide-info"></div>
+    </section>
+
+    <section id="hourly" class="card" hidden>
+      <h2>Next 12 Hours</h2>
+      <div id="hourly-scroll" class="hourly-scroll"></div>
+    </section>
+
+    <section id="week" class="card" hidden>
+      <h2>7-Day Forecast</h2>
+      <div id="weekly-grid" class="weekly-grid"></div>
+    </section>
+
+    <footer>
+      <p>Weather data from <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a> &middot; Tide data from <a href="https://www.worldtides.info/" target="_blank" rel="noopener">WorldTides</a> (estimated)</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
