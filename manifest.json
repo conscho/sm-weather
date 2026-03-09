@@ -1,7 +1,7 @@
 {
   "name": "Santa Monica Weather",
   "short_name": "SM Weather",
-  "start_url": "/",
+  "start_url": "/sm-weather/",
   "display": "standalone",
   "background_color": "#0f1923",
   "theme_color": "#0f1923",
