@@ -237,80 +237,54 @@ function getWeatherInfo(code) {
   return WMO_CODES[code] || { desc: "Unknown", icon: "\u2753" };
 }
 
-// Approximate tide estimation using lunar phase (simplified harmonic)
-// Real apps would use a tide API — this gives a reasonable approximation for Santa Monica Bay
-function estimateTides(now) {
-  const LUNAR_CYCLE_MS = 29.53059 * 24 * 3600 * 1000;
-  // Known new moon reference: Jan 6 2000 18:14 UTC
-  const REF_NEW_MOON = new Date("2000-01-06T18:14:00Z").getTime();
-  const lunarAge = ((now.getTime() - REF_NEW_MOON) % LUNAR_CYCLE_MS + LUNAR_CYCLE_MS) % LUNAR_CYCLE_MS;
-  const lunarPhase = lunarAge / LUNAR_CYCLE_MS; // 0-1
-
-  // Semi-diurnal tide: ~2 highs and 2 lows per day
-  // Tides shift ~50 min later each day (lunar day = 24h 50min)
-  const LUNAR_DAY_MS = (24 * 60 + 50) * 60 * 1000;
+// Fetch real tide predictions from NOAA Tides & Currents API
+// Station 9410840 = Santa Monica, CA
+async function fetchTides(now) {
+  const NOAA_STATION = "9410840";
   const dayStart = new Date(now);
   dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(dayStart.getTime() + 36 * 3600 * 1000); // today + 12h into tomorrow
 
-  // Phase offset based on lunar age
-  const phaseOffset = (lunarAge / LUNAR_DAY_MS) * 2 * Math.PI;
+  const fmt = (d) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
 
-  const tides = [];
-  for (let i = 0; i < 4; i++) {
-    const t = (i * LUNAR_DAY_MS) / 4;
-    const tideTime = new Date(dayStart.getTime() + t + (phaseOffset / (2 * Math.PI)) * (LUNAR_DAY_MS / 2) % LUNAR_DAY_MS);
+  const params = new URLSearchParams({
+    begin_date: fmt(dayStart),
+    end_date: fmt(dayEnd),
+    station: NOAA_STATION,
+    product: "predictions",
+    datum: "MLLW",
+    units: "english",
+    time_zone: "lst_ldt",
+    format: "json",
+    interval: "hilo",
+  });
 
-    // Keep only tides for today/tomorrow
-    if (tideTime < dayStart || tideTime > new Date(dayStart.getTime() + 36 * 3600 * 1000)) continue;
+  const resp = await fetch(
+    `https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?${params}`
+  );
+  if (!resp.ok) throw new Error(`NOAA tide API error: ${resp.status}`);
+  const json = await resp.json();
 
-    const isHigh = i % 2 === 0;
-    // Spring tides near new/full moon, neap tides near quarters
-    const springFactor = Math.abs(Math.cos(lunarPhase * 2 * Math.PI));
-    const height = isHigh
-      ? 3.5 + springFactor * 2.0
-      : 1.5 - springFactor * 0.8;
-
-    tides.push({
-      time: tideTime,
-      type: isHigh ? "High" : "Low",
-      height: height.toFixed(1),
-    });
+  if (!json.predictions || json.predictions.length === 0) {
+    return { tides: [], isSpringTide: false, lunarPhase: 0 };
   }
 
-  // Add a second cycle
-  for (let i = 0; i < 4; i++) {
-    const t = (i * LUNAR_DAY_MS) / 4 + LUNAR_DAY_MS / 2;
-    const tideTime = new Date(dayStart.getTime() + t + (phaseOffset / (2 * Math.PI)) * (LUNAR_DAY_MS / 2) % LUNAR_DAY_MS);
-    if (tideTime < dayStart || tideTime > new Date(dayStart.getTime() + 36 * 3600 * 1000)) continue;
+  const tides = json.predictions.map((p) => ({
+    time: new Date(p.t.replace(" ", "T")),
+    type: p.type === "H" ? "High" : "Low",
+    height: parseFloat(p.v).toFixed(1),
+  }));
 
-    const isHigh = i % 2 === 0;
-    const springFactor = Math.abs(Math.cos(lunarPhase * 2 * Math.PI));
-    const height = isHigh
-      ? 3.5 + springFactor * 1.8
-      : 1.5 - springFactor * 0.7;
+  // Determine spring tide: if any high tide >= 5.0 ft, it's likely a spring tide
+  const isSpringTide = tides.some(
+    (t) => t.type === "High" && parseFloat(t.height) >= 5.0
+  );
 
-    tides.push({
-      time: tideTime,
-      type: isHigh ? "High" : "Low",
-      height: height.toFixed(1),
-    });
-  }
-
-  tides.sort((a, b) => a.time - b.time);
-
-  // Deduplicate tides that are too close together
-  const filtered = [];
-  for (const t of tides) {
-    if (filtered.length === 0 || t.time - filtered[filtered.length - 1].time > 2 * 3600 * 1000) {
-      filtered.push(t);
-    }
-  }
-
-  const isSpringTide = lunarPhase < 0.07 || (lunarPhase > 0.46 && lunarPhase < 0.54) || lunarPhase > 0.93;
-  return { tides: filtered, isSpringTide, lunarPhase };
+  return { tides, isSpringTide, lunarPhase: 0 };
 }
 
-// Continuous tide height at any moment (sinusoidal interpolation between high/low events)
+// Continuous tide height at any moment (cosine interpolation between high/low events)
 function tideHeightAt(time, tideData) {
   const t = time.getTime();
   const events = tideData.tides;
@@ -323,22 +297,19 @@ function tideHeightAt(time, tideData) {
     if (t >= t0 && t <= t1) {
       const h0 = parseFloat(events[i].height);
       const h1 = parseFloat(events[i + 1].height);
-      // Cosine interpolation for smooth tide curve
       const frac = (t - t0) / (t1 - t0);
       return h0 + (h1 - h0) * (0.5 - 0.5 * Math.cos(Math.PI * frac));
     }
   }
 
-  // Before first event or after last: extrapolate from nearest
-  if (t < events[0].time.getTime() && events.length >= 2) {
-    const t0 = events[0].time.getTime();
-    const t1 = events[1].time.getTime();
-    const period = (t1 - t0) * 2;
+  // Before first event: extrapolate from first two
+  if (t < events[0].time.getTime()) {
     const h0 = parseFloat(events[0].height);
     const h1 = parseFloat(events[1].height);
-    const hPrev = h1; // assume mirrored
+    const t0 = events[0].time.getTime();
+    const t1 = events[1].time.getTime();
     const frac = 1 - (t0 - t) / (t1 - t0);
-    if (frac >= 0) return hPrev + (h0 - hPrev) * (0.5 - 0.5 * Math.cos(Math.PI * frac));
+    if (frac >= 0) return h1 + (h0 - h1) * (0.5 - 0.5 * Math.cos(Math.PI * frac));
   }
 
   return parseFloat(events[events.length - 1].height);
@@ -806,7 +777,7 @@ function renderTides(tideData) {
     div.innerHTML = `
       <span class="tide-type">${t.type === "High" ? "\u2B06\uFE0F" : "\u2B07\uFE0F"} ${t.type} Tide</span>
       <span>${formatTime(t.time)}</span>
-      <span>~${t.height} ft</span>
+      <span>${t.height} ft</span>
     `;
     container.appendChild(div);
   }
@@ -820,7 +791,7 @@ function renderTides(tideData) {
 
   const note = document.createElement("p");
   note.className = "tide-note";
-  note.textContent = "Tide times are estimated. Check local tide tables for exact times.";
+  note.textContent = "Tide data from NOAA Station 9410840 (Santa Monica).";
   container.appendChild(note);
 
   document.getElementById("tides").hidden = false;
@@ -985,7 +956,7 @@ function resetThresholds() {
 async function init() {
   try {
     cachedData = await fetchWeather();
-    cachedTideData = estimateTides(new Date());
+    cachedTideData = await fetchTides(new Date());
 
     // Set initial toggle button text
     document.getElementById("unit-toggle").textContent =
