@@ -55,15 +55,7 @@ function solarPosition(date) {
   const rad = Math.PI / 180;
   const deg = 180 / Math.PI;
 
-  // Julian day
-  const JD =
-    Math.floor(365.25 * (date.getUTCFullYear() + 4716)) +
-    Math.floor(30.6001 * ((date.getUTCMonth() + 1 < 3 ? date.getUTCMonth() + 13 : date.getUTCMonth() + 1 + 1))) +
-    date.getUTCDate() +
-    (date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600) / 24 -
-    1524.5;
-
-  // Simplified: use day-of-year approach for declination + equation of time
+  // Day-of-year approach for declination + equation of time
   const start = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
   const dayOfYear = Math.floor((date - start) / 86400000) + 1;
   const B = ((360 / 365) * (dayOfYear - 81)) * rad;
@@ -266,8 +258,12 @@ async function fetchTides(now) {
   if (!resp.ok) throw new Error(`NOAA tide API error: ${resp.status}`);
   const json = await resp.json();
 
+  if (json.error) {
+    throw new Error(`NOAA tide API: ${json.error.message || JSON.stringify(json.error)}`);
+  }
+
   if (!json.predictions || json.predictions.length === 0) {
-    return { tides: [], isSpringTide: false, lunarPhase: 0 };
+    return { tides: [], isSpringTide: false };
   }
 
   const tides = json.predictions.map((p) => ({
@@ -281,7 +277,7 @@ async function fetchTides(now) {
     (t) => t.type === "High" && parseFloat(t.height) >= 5.0
   );
 
-  return { tides, isSpringTide, lunarPhase: 0 };
+  return { tides, isSpringTide };
 }
 
 // Continuous tide height at any moment (cosine interpolation between high/low events)
@@ -373,17 +369,6 @@ function dayName(isoString) {
   return d.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/Los_Angeles" });
 }
 
-// Wind chill approximation (Fahrenheit)
-function windChill(tempF, windMph) {
-  if (tempF > 50 || windMph < 3) return tempF;
-  return (
-    35.74 +
-    0.6215 * tempF -
-    35.75 * Math.pow(windMph, 0.16) +
-    0.4275 * tempF * Math.pow(windMph, 0.16)
-  );
-}
-
 // Determine if the sun is currently shining on the backyard using shadow geometry
 function backyardSunStatus(now, sunrise, sunset) {
   const sunriseDate = new Date(sunrise);
@@ -420,11 +405,11 @@ function layeringAdvice(feelsLike, wind) {
 
 // Rate activities based on current conditions
 function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
-  const temp = weather.temperature;
   const feelsLike = weather.feelsLike;
   const wind = weather.wind;
   const gusts = weather.gusts;
   const isRaining = weather.code >= 51;
+  const isFoggy = weather.code === 45 || weather.code === 48;
   const uv = weather.uv;
   const now = new Date();
   const hour = parseInt(now.toLocaleTimeString("en-US", { hour: "numeric", hour12: false, timeZone: "America/Los_Angeles" }));
@@ -477,7 +462,11 @@ function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
       rating = "bad";
       reason = "Rain makes the Palisades trails slippery and not enjoyable.";
       tip = "";
-    } else if (feelsLike >= thresholds.palisadesGreat && wind < thresholds.walkWindMax && !isRaining) {
+    } else if (isFoggy) {
+      rating = "poor";
+      reason = "Foggy conditions \u2014 limited visibility on the bluffs.";
+      tip = "The ocean views will be obscured. Consider a neighborhood walk instead.";
+    } else if (feelsLike >= thresholds.palisadesGreat && wind < thresholds.walkWindMax) {
       rating = "great";
       reason = `Beautiful conditions \u2014 ${displayTemp(feelsLike)} with manageable wind.`;
       tip = uv >= 6 ? "Bring sunscreen and a hat for sun exposure on the bluffs." : "Enjoy the views!";
@@ -524,9 +513,11 @@ function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
       reason = "No joggable windows today \u2014 tide stays above 2 ft during daylight.";
       tip = "";
     } else if (isJoggableNow) {
-      rating = isRaining ? "fair" : "great";
+      rating = (isRaining || isFoggy) ? "fair" : "great";
       reason = isRaining
         ? `Tide is ${currentTide.toFixed(1)} ft (runnable) but it's raining.`
+        : isFoggy
+        ? `Tide is ${currentTide.toFixed(1)} ft (runnable) but foggy \u2014 watch for other runners.`
         : `Tide is ${currentTide.toFixed(1)} ft \u2014 go now!`;
       tip = `Today\u2019s windows: ${windowStrs.join(", ")}`;
     } else if (!isDaylight) {
@@ -592,6 +583,11 @@ function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
       rating = "fair";
       reason = `Feels like ${displayTemp(feelsLike)} \u2014 manageable with a layer.`;
       tip = isSunsetHour ? "Bring a jacket \u2014 it'll cool off fast after sunset." : "";
+    }
+
+    if (isFoggy && rating !== "bad") {
+      if (tip) tip += " Visibility is low \u2014 be careful at crossings.";
+      else tip = "Visibility is low \u2014 be careful at crossings.";
     }
 
     const walkLayer = layeringAdvice(feelsLike, wind);
@@ -747,14 +743,37 @@ function renderActivities(activities) {
   for (const act of activities) {
     const div = document.createElement("div");
     div.className = `activity-item ${act.rating}`;
-    div.innerHTML = `
-      <div class="activity-icon">${act.icon}</div>
-      <div class="activity-body">
-        <h3>${act.name} <span class="activity-rating">${act.rating}</span></h3>
-        <p class="activity-reason">${act.reason}</p>
-        ${act.tip ? `<p class="activity-tip">${act.tip}</p>` : ""}
-      </div>
-    `;
+
+    const iconEl = document.createElement("div");
+    iconEl.className = "activity-icon";
+    iconEl.textContent = act.icon;
+
+    const body = document.createElement("div");
+    body.className = "activity-body";
+
+    const h3 = document.createElement("h3");
+    h3.textContent = act.name + " ";
+    const ratingSpan = document.createElement("span");
+    ratingSpan.className = "activity-rating";
+    ratingSpan.textContent = act.rating;
+    h3.appendChild(ratingSpan);
+
+    const reasonP = document.createElement("p");
+    reasonP.className = "activity-reason";
+    reasonP.textContent = act.reason;
+
+    body.appendChild(h3);
+    body.appendChild(reasonP);
+
+    if (act.tip) {
+      const tipP = document.createElement("p");
+      tipP.className = "activity-tip";
+      tipP.textContent = act.tip;
+      body.appendChild(tipP);
+    }
+
+    div.appendChild(iconEl);
+    div.appendChild(body);
     container.appendChild(div);
   }
 
@@ -825,6 +844,7 @@ function renderHourly(data) {
       <div class="hour-time">${formatHour(h.time)}</div>
       <div class="hour-icon">${getWeatherInfo(h.code).icon}</div>
       <div class="hour-temp">${displayTempValue(h.temperature)}\u00B0</div>
+      <div class="hour-feels">Feels ${displayTempValue(h.feelsLike)}\u00B0</div>
       <div class="hour-wind">${Math.round(h.wind)} mph</div>
     `;
     container.appendChild(div);
@@ -868,6 +888,28 @@ function renderWeekly(data) {
 
 let cachedData = null;
 let cachedTideData = null;
+let lastRenderState = null; // cached intermediate values for targeted re-render
+let lastFetchTime = 0;
+const EMPTY_TIDES = { tides: [], isSpringTide: false };
+const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+
+// Memoize findSunWindows per calendar day
+let _sunWindowsCache = { key: null, result: null };
+const _origFindSunWindows = findSunWindows;
+findSunWindows = function(date) {
+  const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  if (_sunWindowsCache.key === key) return _sunWindowsCache.result;
+  const result = _origFindSunWindows(date);
+  _sunWindowsCache = { key, result };
+  return result;
+};
+
+function updateLastUpdated() {
+  const el = document.getElementById("last-updated");
+  if (el) {
+    el.textContent = `Last updated: ${formatTime(new Date())}`;
+  }
+}
 
 function renderAll(data, tideData) {
   const weather = renderCurrent(data);
@@ -876,6 +918,15 @@ function renderAll(data, tideData) {
   renderTides(tideData);
   renderWeekly(data);
 
+  lastRenderState = { weather, hourly, tideData, data };
+
+  reRenderActivities();
+  updateLastUpdated();
+}
+
+function reRenderActivities() {
+  if (!lastRenderState) return;
+  const { weather, hourly, tideData, data } = lastRenderState;
   const activities = rateActivities(
     weather,
     tideData,
@@ -892,7 +943,7 @@ function toggleUnit() {
   localStorage.setItem("tempUnit", tempUnit);
   document.getElementById("unit-toggle").textContent =
     tempUnit === "C" ? "Switch to \u00B0F" : "Switch to \u00B0C";
-  renderSettings(); // update displayed values in settings
+  renderSettings();
   if (cachedData && cachedTideData) renderAll(cachedData, cachedTideData);
 }
 
@@ -941,7 +992,7 @@ function renderSettings() {
       if (isNaN(val)) return;
       thresholds[key] = isWind ? val : inputToF(val);
       saveThresholds(thresholds);
-      if (cachedData && cachedTideData) renderAll(cachedData, cachedTideData);
+      reRenderActivities();
     });
   }
 }
@@ -950,24 +1001,102 @@ function resetThresholds() {
   thresholds = { ...DEFAULT_THRESHOLDS };
   saveThresholds(thresholds);
   renderSettings();
-  if (cachedData && cachedTideData) renderAll(cachedData, cachedTideData);
+  reRenderActivities();
+}
+
+// Save/load cached API data from localStorage for instant render
+function saveToLocalCache(weatherData, tideData) {
+  try {
+    localStorage.setItem("cachedWeather", JSON.stringify(weatherData));
+    localStorage.setItem("cachedTides", JSON.stringify(tideData));
+    localStorage.setItem("cachedTime", Date.now().toString());
+  } catch (e) { /* quota exceeded — ignore */ }
+}
+
+function loadFromLocalCache() {
+  try {
+    const weather = localStorage.getItem("cachedWeather");
+    const tides = localStorage.getItem("cachedTides");
+    const time = localStorage.getItem("cachedTime");
+    if (!weather || !tides || !time) return null;
+    const age = Date.now() - parseInt(time, 10);
+    if (age > 60 * 60 * 1000) return null; // discard if older than 1 hour
+    const tideData = JSON.parse(tides);
+    // Restore Date objects from serialized tide data
+    if (tideData.tides) {
+      tideData.tides = tideData.tides.map((t) => ({ ...t, time: new Date(t.time) }));
+    }
+    return { weather: JSON.parse(weather), tides: tideData };
+  } catch (e) { return null; }
+}
+
+async function fetchAllData() {
+  const [weatherResult, tideResult] = await Promise.allSettled([
+    fetchWeather(),
+    fetchTides(new Date()),
+  ]);
+
+  if (weatherResult.status === "rejected") {
+    throw new Error(`Weather: ${weatherResult.reason.message}`);
+  }
+
+  const weatherData = weatherResult.value;
+  let tideData;
+
+  if (tideResult.status === "rejected") {
+    console.error("Tide fetch failed, using empty tides:", tideResult.reason);
+    tideData = EMPTY_TIDES;
+  } else {
+    tideData = tideResult.value;
+  }
+
+  lastFetchTime = Date.now();
+  return { weatherData, tideData };
 }
 
 async function init() {
+  // Set initial toggle button text
+  document.getElementById("unit-toggle").textContent =
+    tempUnit === "C" ? "Switch to \u00B0F" : "Switch to \u00B0C";
+
+  // Try to render from local cache immediately for a fast first paint
+  const localCache = loadFromLocalCache();
+  if (localCache) {
+    cachedData = localCache.weather;
+    cachedTideData = localCache.tides;
+    renderAll(cachedData, cachedTideData);
+  }
+
   try {
-    cachedData = await fetchWeather();
-    cachedTideData = await fetchTides(new Date());
-
-    // Set initial toggle button text
-    document.getElementById("unit-toggle").textContent =
-      tempUnit === "C" ? "Switch to \u00B0F" : "Switch to \u00B0C";
-
+    const { weatherData, tideData } = await fetchAllData();
+    cachedData = weatherData;
+    cachedTideData = tideData;
+    saveToLocalCache(cachedData, cachedTideData);
     renderAll(cachedData, cachedTideData);
   } catch (err) {
-    document.getElementById("loading").textContent =
-      `Failed to load weather data: ${err.message}. Please refresh to try again.`;
+    // If we already rendered from cache, keep showing that
+    if (!localCache) {
+      document.getElementById("loading").textContent =
+        `Failed to load weather data: ${err.message}. Please refresh to try again.`;
+    }
     console.error(err);
   }
 }
+
+// Auto-refresh when returning to the tab after 15+ minutes
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden) return;
+  if (Date.now() - lastFetchTime < REFRESH_INTERVAL_MS) return;
+
+  try {
+    const { weatherData, tideData } = await fetchAllData();
+    cachedData = weatherData;
+    cachedTideData = tideData;
+    saveToLocalCache(cachedData, cachedTideData);
+    renderAll(cachedData, cachedTideData);
+  } catch (err) {
+    console.error("Auto-refresh failed:", err);
+  }
+});
 
 init();

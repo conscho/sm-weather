@@ -395,6 +395,11 @@ header h1 {
   font-size: 1.2rem;
 }
 
+.hour-item .hour-feels {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
 .hour-item .hour-wind {
   color: var(--text-muted);
   font-size: 0.75rem;
