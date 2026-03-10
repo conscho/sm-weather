@@ -29,6 +29,12 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
 @supports (padding: env(safe-area-inset-top)) {
   .app {
     padding-top: calc(24px + env(safe-area-inset-top));
@@ -36,12 +42,6 @@ body {
     padding-left: calc(16px + env(safe-area-inset-left));
     padding-right: calc(16px + env(safe-area-inset-right));
   }
-}
-
-.app {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 24px 16px;
 }
 
 header {
