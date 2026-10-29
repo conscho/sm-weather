@@ -323,7 +323,8 @@ function tideHeightAt(time, tideData) {
     if (frac >= 0) return h1 + (h0 - h1) * (0.5 - 0.5 * Math.cos(Math.PI * frac));
   }
 
-  return parseFloat(events[events.length - 1].height);
+  // Outside the predictions we have: unknown rather than a made-up flat line
+  return null;
 }
 
 // Civil twilight: until the sun is 6° below the horizon (roughly 25–30 min
@@ -582,6 +583,10 @@ function rateActivities(weather, tideData, sunStatus, data) {
       tip = tomorrowWindows.length > 0
         ? `Tomorrow\u2019s windows: ${formatWindows(tomorrowWindows)}`
         : "";
+    } else if (tideData.tides.length === 0) {
+      rating = "fair";
+      reason = "Tide data isn't available right now, so there's no telling if the beach is runnable.";
+      tip = "You need a tide under 2 ft \u2014 check a tide chart before heading out.";
     } else if (joggableWindows.length === 0) {
       rating = "bad";
       reason = "No joggable windows today \u2014 tide stays above 2 ft while it's light out.";
