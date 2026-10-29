@@ -926,6 +926,7 @@ function hourlyAt(hourly, time) {
 
 function renderHourly(data) {
   const container = document.getElementById("hourly-scroll");
+  const scrollLeft = container.scrollLeft;
   container.innerHTML = "";
 
   const now = new Date();
@@ -949,6 +950,7 @@ function renderHourly(data) {
     `;
     container.appendChild(div);
   }
+  container.scrollLeft = scrollLeft;
 
   document.getElementById("hourly").hidden = false;
 }
@@ -988,7 +990,7 @@ function renderWeekly(data) {
 let cachedData = null;
 let cachedTideData = null;
 let lastRenderState = null; // cached intermediate values for targeted re-render
-let lastFetchTime = 0;
+let lastFetchTime = 0; // when the data on screen was fetched
 const EMPTY_TIDES = { tides: [], isSpringTide: false };
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const CACHE_VERSION = "2"; // bump when the cached data format changes
@@ -996,7 +998,7 @@ const CACHE_VERSION = "2"; // bump when the cached data format changes
 function updateLastUpdated() {
   const el = document.getElementById("last-updated");
   if (el) {
-    el.textContent = `Last updated: ${formatTime(new Date())}`;
+    el.textContent = `Last updated: ${formatTime(new Date(lastFetchTime))}`;
   }
 }
 
@@ -1091,7 +1093,7 @@ function saveToLocalCache(weatherData, tideData) {
   try {
     localStorage.setItem("cachedWeather", JSON.stringify(weatherData));
     localStorage.setItem("cachedTides", JSON.stringify(tideData));
-    localStorage.setItem("cachedTime", Date.now().toString());
+    localStorage.setItem("cachedTime", lastFetchTime.toString());
     localStorage.setItem("cacheVersion", CACHE_VERSION);
   } catch (e) { /* quota exceeded — ignore */ }
 }
@@ -1110,7 +1112,7 @@ function loadFromLocalCache() {
     if (tideData.tides) {
       tideData.tides = tideData.tides.map((t) => ({ ...t, time: new Date(t.time) }));
     }
-    return { weather: JSON.parse(weather), tides: tideData };
+    return { weather: JSON.parse(weather), tides: tideData, time: parseInt(time, 10) };
   } catch (e) { return null; }
 }
 
@@ -1138,6 +1140,23 @@ async function fetchAllData() {
   return { weatherData, tideData };
 }
 
+// Fetch fresh data and re-render (one request at a time); rejects if the
+// weather fetch fails
+let refreshInFlight = null;
+function refresh() {
+  if (!refreshInFlight) {
+    refreshInFlight = fetchAllData()
+      .then(({ weatherData, tideData }) => {
+        cachedData = weatherData;
+        cachedTideData = tideData;
+        saveToLocalCache(cachedData, cachedTideData);
+        renderAll(cachedData, cachedTideData);
+      })
+      .finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
 async function init() {
   // Set initial toggle button text
   document.getElementById("unit-toggle").textContent =
@@ -1148,39 +1167,38 @@ async function init() {
   if (localCache) {
     cachedData = localCache.weather;
     cachedTideData = localCache.tides;
+    lastFetchTime = localCache.time;
     renderAll(cachedData, cachedTideData);
   }
 
   try {
-    const { weatherData, tideData } = await fetchAllData();
-    cachedData = weatherData;
-    cachedTideData = tideData;
-    saveToLocalCache(cachedData, cachedTideData);
-    renderAll(cachedData, cachedTideData);
+    await refresh();
   } catch (err) {
     // If we already rendered from cache, keep showing that
     if (!localCache) {
       document.getElementById("loading").textContent =
-        `Failed to load weather data: ${err.message}. Please refresh to try again.`;
+        `Failed to load weather data: ${err.message}. Retrying every minute\u2026`;
     }
     console.error(err);
   }
 }
 
-// Auto-refresh when returning to the tab after 15+ minutes
-document.addEventListener("visibilitychange", async () => {
+// Ratings and the sun status depend on the time of day, so re-render every
+// minute while the app is open, and refetch once the data is 15+ minutes old
+async function tick() {
   if (document.hidden) return;
-  if (Date.now() - lastFetchTime < REFRESH_INTERVAL_MS) return;
-
-  try {
-    const { weatherData, tideData } = await fetchAllData();
-    cachedData = weatherData;
-    cachedTideData = tideData;
-    saveToLocalCache(cachedData, cachedTideData);
-    renderAll(cachedData, cachedTideData);
-  } catch (err) {
-    console.error("Auto-refresh failed:", err);
+  if (Date.now() - lastFetchTime >= REFRESH_INTERVAL_MS) {
+    try {
+      await refresh();
+      return;
+    } catch (err) {
+      console.error("Auto-refresh failed:", err);
+    }
   }
-});
+  if (cachedData && cachedTideData) renderAll(cachedData, cachedTideData);
+}
+
+document.addEventListener("visibilitychange", tick);
+setInterval(tick, 60 * 1000);
 
 init();
