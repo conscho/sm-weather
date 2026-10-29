@@ -1,6 +1,9 @@
 // Santa Monica coordinates (6th & Wilshire area)
 const LAT = 34.0259;
 const LON = -118.4930;
+// All times are shown and reasoned about in Santa Monica time, whatever the
+// device's own time zone is
+const TIME_ZONE = "America/Los_Angeles";
 
 // Temperature unit: "C" or "F" — default Celsius
 let tempUnit = localStorage.getItem("tempUnit") || "C";
@@ -172,48 +175,44 @@ function backyardSunFraction(date) {
   return { fraction: sunlit / total, elevation, azimuth };
 }
 
-// Find today's sun windows where >= 25% of the yard is lit
+// Fraction of the yard lit every 10 minutes from sunrise to sunset
+// Memoized per day: this is the expensive part and only depends on the date
+let sunSamplesCache = { key: null, samples: null };
+function daySunSamples(sunrise, sunset) {
+  if (sunSamplesCache.key === sunrise.getTime()) return sunSamplesCache.samples;
+  const STEP_MS = 10 * 60 * 1000;
+  const samples = [];
+  for (let t = Math.ceil(sunrise.getTime() / STEP_MS) * STEP_MS; t <= sunset.getTime(); t += STEP_MS) {
+    const time = new Date(t);
+    samples.push({ time, fraction: backyardSunFraction(time).fraction });
+  }
+  sunSamplesCache = { key: sunrise.getTime(), samples };
+  return samples;
+}
+
+// Find the day's sun windows where >= 25% of the yard is lit
 // Returns array of { start, end, peakFraction, peakTime }
-function findSunWindows(date) {
-  const day = new Date(date);
-  day.setHours(0, 0, 0, 0);
+function findSunWindows(sunrise, sunset) {
   const windows = [];
   let currentWindow = null;
-  let peakFraction = 0;
-  let peakTime = null;
 
-  // Scan every 10 minutes from 6am to 8pm local
-  for (let min = 6 * 60; min <= 20 * 60; min += 10) {
-    const t = new Date(day.getTime() + min * 60 * 1000);
-    const { fraction } = backyardSunFraction(t);
-
+  for (const { time, fraction } of daySunSamples(sunrise, sunset)) {
     if (fraction >= SUN_THRESHOLD) {
       if (!currentWindow) {
-        currentWindow = { start: t, end: t };
-        peakFraction = fraction;
-        peakTime = t;
+        currentWindow = { start: time, end: time, peakFraction: fraction, peakTime: time };
       } else {
-        currentWindow.end = t;
-        if (fraction > peakFraction) {
-          peakFraction = fraction;
-          peakTime = t;
+        currentWindow.end = time;
+        if (fraction > currentWindow.peakFraction) {
+          currentWindow.peakFraction = fraction;
+          currentWindow.peakTime = time;
         }
       }
     } else if (currentWindow) {
-      currentWindow.peakFraction = peakFraction;
-      currentWindow.peakTime = peakTime;
       windows.push(currentWindow);
       currentWindow = null;
-      peakFraction = 0;
-      peakTime = null;
     }
   }
-
-  if (currentWindow) {
-    currentWindow.peakFraction = peakFraction;
-    currentWindow.peakTime = peakTime;
-    windows.push(currentWindow);
-  }
+  if (currentWindow) windows.push(currentWindow);
 
   return windows;
 }
@@ -245,21 +244,17 @@ function getWeatherInfo(code) {
 // Station 9410840 = Santa Monica, CA
 async function fetchTides(now) {
   const NOAA_STATION = "9410840";
-  const dayStart = new Date(now);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(dayStart.getTime() + 36 * 3600 * 1000); // today + 12h into tomorrow
-
-  const fmt = (d) =>
-    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  // Times come back in GMT; three GMT days fully cover today and tomorrow here
+  const today = localDateKey(now);
 
   const params = new URLSearchParams({
-    begin_date: fmt(dayStart),
-    end_date: fmt(dayEnd),
+    begin_date: today,
+    end_date: shiftDateKey(today, 2),
     station: NOAA_STATION,
     product: "predictions",
     datum: "MLLW",
     units: "english",
-    time_zone: "lst_ldt",
+    time_zone: "gmt",
     format: "json",
     interval: "hilo",
   });
@@ -279,7 +274,7 @@ async function fetchTides(now) {
   }
 
   const tides = json.predictions.map((p) => ({
-    time: new Date(p.t.replace(" ", "T")),
+    time: new Date(`${p.t.replace(" ", "T")}Z`),
     type: p.type === "H" ? "High" : "Low",
     height: parseFloat(p.v).toFixed(1),
   }));
@@ -331,9 +326,9 @@ const CIVIL_TWILIGHT_ELEVATION = -6; // degrees
 function civilTwilight(sunrise, sunset) {
   const STEP_MS = 60 * 1000;
   const isLight = (t) => solarPosition(new Date(t)).elevation >= CIVIL_TWILIGHT_ELEVATION;
-  let dawn = new Date(sunrise).getTime();
+  let dawn = sunrise.getTime();
   while (isLight(dawn - STEP_MS)) dawn -= STEP_MS;
-  let dusk = new Date(sunset).getTime();
+  let dusk = sunset.getTime();
   while (isLight(dusk + STEP_MS)) dusk += STEP_MS;
   return { dawn: new Date(dawn), dusk: new Date(dusk) };
 }
@@ -369,40 +364,56 @@ function findJoggableWindows(dawn, dusk, tideData) {
   return windows;
 }
 
+// Open-Meteo times are Unix seconds
+function unixDate(seconds) {
+  return new Date(seconds * 1000);
+}
+
+// Santa Monica calendar date as "YYYYMMDD"
+function localDateKey(date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date);
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return `${get("year")}${get("month")}${get("day")}`;
+}
+
+// Shift a "YYYYMMDD" date key by whole calendar days (DST-proof)
+function shiftDateKey(key, days) {
+  const d = new Date(Date.UTC(+key.slice(0, 4), +key.slice(4, 6) - 1, +key.slice(6, 8) + days));
+  return d.toISOString().slice(0, 10).replace(/-/g, "");
+}
+
 function formatTime(date) {
   return date.toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "America/Los_Angeles",
+    timeZone: TIME_ZONE,
   });
 }
 
-function formatHour(isoString) {
-  const d = new Date(isoString);
-  return d.toLocaleTimeString("en-US", {
+function formatHour(unixSeconds) {
+  return unixDate(unixSeconds).toLocaleTimeString("en-US", {
     hour: "numeric",
-    timeZone: "America/Los_Angeles",
+    timeZone: TIME_ZONE,
   });
 }
 
-function dayName(isoString) {
-  const d = new Date(isoString);
-  const now = new Date();
-  const today = new Date(now.toLocaleDateString("en-US", { timeZone: "America/Los_Angeles" }));
-  const target = new Date(d.toLocaleDateString("en-US", { timeZone: "America/Los_Angeles" }));
-  const diff = (target - today) / 86400000;
-  if (diff === 0) return "Today";
-  if (diff === 1) return "Tomorrow";
-  return d.toLocaleDateString("en-US", { weekday: "short", timeZone: "America/Los_Angeles" });
+function dayName(unixSeconds) {
+  // Daily entries are stamped at midnight; midday is unambiguously on that day
+  const midday = new Date(unixSeconds * 1000 + 12 * 3600 * 1000);
+  const key = localDateKey(midday);
+  const today = localDateKey(new Date());
+  if (key === today) return "Today";
+  if (key === shiftDateKey(today, 1)) return "Tomorrow";
+  return midday.toLocaleDateString("en-US", { weekday: "short", timeZone: TIME_ZONE });
 }
 
 // Determine if the sun is currently shining on the backyard using shadow geometry
 function backyardSunStatus(now, sunrise, sunset) {
-  const sunriseDate = new Date(sunrise);
-  const sunsetDate = new Date(sunset);
-  const windows = findSunWindows(now);
-  if (now < sunriseDate) return { hasSun: false, fraction: 0, label: "Before sunrise", windows };
-  if (now > sunsetDate) return { hasSun: false, fraction: 0, label: "After sunset", windows };
+  const windows = findSunWindows(sunrise, sunset);
+  if (now < sunrise) return { hasSun: false, fraction: 0, label: "Before sunrise", windows };
+  if (now > sunset) return { hasSun: false, fraction: 0, label: "After sunset", windows };
 
   const { fraction, elevation } = backyardSunFraction(now);
   const pct = Math.round(fraction * 100);
@@ -535,7 +546,7 @@ function rateActivities(weather, tideData, sunStatus, data) {
   // 3. Beach run — only while there's light (incl. twilight) with tide < 2 ft
   {
     let rating, reason, tip;
-    const light = civilTwilight(daily.sunrise[0], daily.sunset[0]);
+    const light = civilTwilight(unixDate(daily.sunrise[0]), unixDate(daily.sunset[0]));
     const joggableWindows = findJoggableWindows(light.dawn, light.dusk, tideData);
     const currentTide = tideHeightAt(now, tideData);
     const hasLight = now >= light.dawn && now <= light.dusk;
@@ -548,7 +559,7 @@ function rateActivities(weather, tideData, sunStatus, data) {
     const windowStrs = formatWindows(joggableWindows);
 
     if (now > light.dusk) {
-      const tomorrowLight = civilTwilight(daily.sunrise[1], daily.sunset[1]);
+      const tomorrowLight = civilTwilight(unixDate(daily.sunrise[1]), unixDate(daily.sunset[1]));
       const tomorrowWindows = findJoggableWindows(tomorrowLight.dawn, tomorrowLight.dusk, tideData);
       rating = "poor";
       reason = "Too dark to run on the beach right now.";
@@ -566,7 +577,7 @@ function rateActivities(weather, tideData, sunStatus, data) {
         : isFoggy
         ? `Tide is ${currentTide.toFixed(1)} ft (runnable) but foggy \u2014 watch for other runners.`
         : `Tide is ${currentTide.toFixed(1)} ft \u2014 go now!`;
-      if (now > new Date(daily.sunset[0])) reason += ` Light lasts until about ${formatTime(light.dusk)}.`;
+      if (now > unixDate(daily.sunset[0])) reason += ` Light lasts until about ${formatTime(light.dusk)}.`;
       tip = `Today\u2019s windows: ${windowStrs}`;
     } else if (!hasLight) {
       rating = "poor";
@@ -594,8 +605,8 @@ function rateActivities(weather, tideData, sunStatus, data) {
   // 4. Neighborhood walk (day / sunset / night)
   {
     let rating, reason, tip;
-    const sunrise = new Date(daily.sunrise[0]);
-    const sunset = new Date(daily.sunset[0]);
+    const sunrise = unixDate(daily.sunrise[0]);
+    const sunset = unixDate(daily.sunset[0]);
     // Sunset walk: from an hour before sunset until an hour after
     const SUNSET_WALK_MS = 60 * 60 * 1000;
     const isSunsetTime = Math.abs(now - sunset) <= SUNSET_WALK_MS;
@@ -719,7 +730,8 @@ async function fetchWeather() {
     ].join(","),
     temperature_unit: "fahrenheit",
     wind_speed_unit: "mph",
-    timezone: "America/Los_Angeles",
+    timezone: TIME_ZONE,
+    timeformat: "unixtime", // absolute times, not device-local strings
     forecast_days: 7,
   });
 
@@ -742,10 +754,10 @@ function renderCurrent(data) {
   document.getElementById("humidity").textContent = `${c.relative_humidity_2m}%`;
   document.getElementById("uv").textContent = c.uv_index.toFixed(1);
 
-  const sunrise = daily.sunrise[0];
-  const sunset = daily.sunset[0];
-  document.getElementById("sunrise").textContent = formatTime(new Date(sunrise));
-  document.getElementById("sunset").textContent = formatTime(new Date(sunset));
+  const sunrise = unixDate(daily.sunrise[0]);
+  const sunset = unixDate(daily.sunset[0]);
+  document.getElementById("sunrise").textContent = formatTime(sunrise);
+  document.getElementById("sunset").textContent = formatTime(sunset);
 
   const sunStatus = backyardSunStatus(now, sunrise, sunset);
   document.getElementById("sun-status").textContent = sunStatus.label;
@@ -835,7 +847,9 @@ function renderTides(tideData) {
     return;
   }
 
-  for (const t of tideData.tides) {
+  const today = localDateKey(new Date());
+  const shownDays = [today, shiftDateKey(today, 1)];
+  for (const t of tideData.tides.filter((e) => shownDays.includes(localDateKey(e.time)))) {
     const div = document.createElement("div");
     div.className = `tide-event ${t.type.toLowerCase()}`;
     div.innerHTML = `
@@ -875,7 +889,7 @@ function forecastHour(hourly, i) {
 
 // Forecast for the hour nearest `time`, or null if it's outside the forecast
 function hourlyAt(hourly, time) {
-  const i = hourly.time.findIndex((t) => Math.abs(new Date(t) - time) <= 30 * 60 * 1000);
+  const i = hourly.time.findIndex((t) => Math.abs(unixDate(t) - time) <= 30 * 60 * 1000);
   return i < 0 ? null : forecastHour(hourly, i);
 }
 
@@ -884,8 +898,7 @@ function renderHourly(data) {
   container.innerHTML = "";
 
   const now = new Date();
-  const currentHourISO = data.hourly.time.find((t) => new Date(t) >= now);
-  const startIdx = data.hourly.time.indexOf(currentHourISO);
+  const startIdx = data.hourly.time.findIndex((t) => unixDate(t) >= now);
   if (startIdx < 0) return;
 
   const hours = [];
@@ -947,17 +960,7 @@ let lastRenderState = null; // cached intermediate values for targeted re-render
 let lastFetchTime = 0;
 const EMPTY_TIDES = { tides: [], isSpringTide: false };
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
-
-// Memoize findSunWindows per calendar day
-let _sunWindowsCache = { key: null, result: null };
-const _origFindSunWindows = findSunWindows;
-findSunWindows = function(date) {
-  const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
-  if (_sunWindowsCache.key === key) return _sunWindowsCache.result;
-  const result = _origFindSunWindows(date);
-  _sunWindowsCache = { key, result };
-  return result;
-};
+const CACHE_VERSION = "2"; // bump when the cached data format changes
 
 function updateLastUpdated() {
   const el = document.getElementById("last-updated");
@@ -1058,6 +1061,7 @@ function saveToLocalCache(weatherData, tideData) {
     localStorage.setItem("cachedWeather", JSON.stringify(weatherData));
     localStorage.setItem("cachedTides", JSON.stringify(tideData));
     localStorage.setItem("cachedTime", Date.now().toString());
+    localStorage.setItem("cacheVersion", CACHE_VERSION);
   } catch (e) { /* quota exceeded — ignore */ }
 }
 
@@ -1067,6 +1071,7 @@ function loadFromLocalCache() {
     const tides = localStorage.getItem("cachedTides");
     const time = localStorage.getItem("cachedTime");
     if (!weather || !tides || !time) return null;
+    if (localStorage.getItem("cacheVersion") !== CACHE_VERSION) return null;
     const age = Date.now() - parseInt(time, 10);
     if (age > 60 * 60 * 1000) return null; // discard if older than 1 hour
     const tideData = JSON.parse(tides);
