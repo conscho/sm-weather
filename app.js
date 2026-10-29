@@ -236,12 +236,25 @@ const WMO_CODES = {
   51: { desc: "Light drizzle", icon: "\uD83C\uDF26\uFE0F" },
   53: { desc: "Moderate drizzle", icon: "\uD83C\uDF26\uFE0F" },
   55: { desc: "Dense drizzle", icon: "\uD83C\uDF27\uFE0F" },
+  56: { desc: "Light freezing drizzle", icon: "\uD83C\uDF27\uFE0F" },
+  57: { desc: "Dense freezing drizzle", icon: "\uD83C\uDF27\uFE0F" },
   61: { desc: "Slight rain", icon: "\uD83C\uDF27\uFE0F" },
   63: { desc: "Moderate rain", icon: "\uD83C\uDF27\uFE0F" },
   65: { desc: "Heavy rain", icon: "\uD83C\uDF27\uFE0F" },
+  66: { desc: "Light freezing rain", icon: "\uD83C\uDF27\uFE0F" },
+  67: { desc: "Heavy freezing rain", icon: "\uD83C\uDF27\uFE0F" },
+  71: { desc: "Slight snow", icon: "\uD83C\uDF28\uFE0F" },
+  73: { desc: "Moderate snow", icon: "\uD83C\uDF28\uFE0F" },
+  75: { desc: "Heavy snow", icon: "\uD83C\uDF28\uFE0F" },
+  77: { desc: "Snow grains", icon: "\uD83C\uDF28\uFE0F" },
   80: { desc: "Slight showers", icon: "\uD83C\uDF26\uFE0F" },
   81: { desc: "Moderate showers", icon: "\uD83C\uDF27\uFE0F" },
   82: { desc: "Violent showers", icon: "\u26C8\uFE0F" },
+  85: { desc: "Slight snow showers", icon: "\uD83C\uDF28\uFE0F" },
+  86: { desc: "Heavy snow showers", icon: "\uD83C\uDF28\uFE0F" },
+  95: { desc: "Thunderstorm", icon: "\u26C8\uFE0F" },
+  96: { desc: "Thunderstorm with slight hail", icon: "\u26C8\uFE0F" },
+  99: { desc: "Thunderstorm with heavy hail", icon: "\u26C8\uFE0F" },
 };
 
 function getWeatherInfo(code) {
@@ -821,9 +834,17 @@ function renderCurrent(data) {
   };
 }
 
+// Create an element with an optional class and text (never parsed as HTML)
+function createEl(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
 function renderActivities(activities) {
   const container = document.getElementById("activity-list");
-  container.innerHTML = "";
+  container.replaceChildren();
 
   // Cards stay in the fixed order rateActivities builds them in (not sorted by
   // rating) so they don't shift around between visits
@@ -869,10 +890,10 @@ function renderActivities(activities) {
 
 function renderTides(tideData) {
   const container = document.getElementById("tide-info");
-  container.innerHTML = "";
+  container.replaceChildren();
 
   if (tideData.tides.length === 0) {
-    container.innerHTML = '<p class="tide-note">No tide data available.</p>';
+    container.append(createEl("p", "tide-note", "No tide data available."));
     document.getElementById("tides").hidden = false;
     return;
   }
@@ -880,13 +901,12 @@ function renderTides(tideData) {
   const today = localDateKey(new Date());
   const shownDays = [today, shiftDateKey(today, 1)];
   for (const t of tideData.tides.filter((e) => shownDays.includes(localDateKey(e.time)))) {
-    const div = document.createElement("div");
-    div.className = `tide-event ${t.type.toLowerCase()}`;
-    div.innerHTML = `
-      <span class="tide-type">${t.type === "High" ? "\u2B06\uFE0F" : "\u2B07\uFE0F"} ${t.type} Tide</span>
-      <span>${formatTime(t.time)}</span>
-      <span>${t.height} ft</span>
-    `;
+    const div = createEl("div", `tide-event ${t.type.toLowerCase()}`);
+    div.append(
+      createEl("span", "tide-type", `${t.type === "High" ? "\u2B06\uFE0F" : "\u2B07\uFE0F"} ${t.type} Tide`),
+      createEl("span", "", formatTime(t.time)),
+      createEl("span", "", `${t.height} ft`),
+    );
     container.appendChild(div);
   }
 
@@ -927,7 +947,7 @@ function hourlyAt(hourly, time) {
 function renderHourly(data) {
   const container = document.getElementById("hourly-scroll");
   const scrollLeft = container.scrollLeft;
-  container.innerHTML = "";
+  container.replaceChildren();
 
   const now = new Date();
   const startIdx = data.hourly.time.findIndex((t) => unixDate(t) >= now);
@@ -939,15 +959,14 @@ function renderHourly(data) {
   }
 
   for (const h of hours) {
-    const div = document.createElement("div");
-    div.className = "hour-item";
-    div.innerHTML = `
-      <div class="hour-time">${formatHour(h.time)}</div>
-      <div class="hour-icon">${getWeatherInfo(h.code).icon}</div>
-      <div class="hour-temp">${displayTempValue(h.temperature)}\u00B0</div>
-      <div class="hour-feels">Feels ${displayTempValue(h.feelsLike)}\u00B0</div>
-      <div class="hour-wind">${Math.round(h.wind)} mph</div>
-    `;
+    const div = createEl("div", "hour-item");
+    div.append(
+      createEl("div", "hour-time", formatHour(h.time)),
+      createEl("div", "hour-icon", getWeatherInfo(h.code).icon),
+      createEl("div", "hour-temp", `${displayTempValue(h.temperature)}\u00B0`),
+      createEl("div", "hour-feels", `Feels ${displayTempValue(h.feelsLike)}\u00B0`),
+      createEl("div", "hour-wind", `${Math.round(h.wind)} mph`),
+    );
     container.appendChild(div);
   }
   container.scrollLeft = scrollLeft;
@@ -957,7 +976,7 @@ function renderHourly(data) {
 
 function renderWeekly(data) {
   const container = document.getElementById("weekly-grid");
-  container.innerHTML = "";
+  container.replaceChildren();
 
   const daily = data.daily;
   const allTemps = [...daily.temperature_2m_min, ...daily.temperature_2m_max];
@@ -971,16 +990,21 @@ function renderWeekly(data) {
     const leftPct = ((lo - globalMin) / range) * 100;
     const widthPct = ((hi - lo) / range) * 100;
 
-    const div = document.createElement("div");
-    div.className = "day-row";
-    div.innerHTML = `
-      <span class="day-name">${dayName(daily.time[i])}</span>
-      <span class="day-icon">${getWeatherInfo(daily.weather_code[i]).icon}</span>
-      <div class="day-bar-container">
-        <div class="day-bar" style="margin-left:${leftPct}%;width:${Math.max(widthPct, 4)}%"></div>
-      </div>
-      <span class="day-temps"><span class="lo">${displayTempValue(lo)}\u00B0</span> / ${displayTempValue(hi)}\u00B0</span>
-    `;
+    const bar = createEl("div", "day-bar");
+    bar.style.marginLeft = `${leftPct}%`;
+    bar.style.width = `${Math.max(widthPct, 4)}%`;
+    const barContainer = createEl("div", "day-bar-container");
+    barContainer.append(bar);
+    const temps = createEl("span", "day-temps");
+    temps.append(createEl("span", "lo", `${displayTempValue(lo)}\u00B0`), ` / ${displayTempValue(hi)}\u00B0`);
+
+    const div = createEl("div", "day-row");
+    div.append(
+      createEl("span", "day-name", dayName(daily.time[i])),
+      createEl("span", "day-icon", getWeatherInfo(daily.weather_code[i]).icon),
+      barContainer,
+      temps,
+    );
     container.appendChild(div);
   }
 
@@ -1049,28 +1073,28 @@ const THRESHOLD_LABELS = {
 
 function renderSettings() {
   const grid = document.getElementById("settings-grid");
-  grid.innerHTML = "";
+  grid.replaceChildren();
 
   for (const [key, label] of Object.entries(THRESHOLD_LABELS)) {
-    const row = document.createElement("div");
-    row.className = "settings-row";
-
     const isWind = key === "walkWindMax";
     const displayVal = isWind
       ? thresholds[key]
       : displayTempValue(thresholds[key]);
     const suffix = isWind ? " mph" : ` ${unitLabel()}`;
 
-    row.innerHTML = `
-      <label>${label}</label>
-      <div class="settings-input-group">
-        <input type="number" value="${displayVal}" data-key="${key}" data-is-wind="${isWind}" class="settings-input">
-        <span class="settings-suffix">${suffix}</span>
-      </div>
-    `;
+    const input = createEl("input", "settings-input");
+    input.type = "number";
+    input.value = displayVal;
+    input.id = `threshold-${key}`;
+    const labelEl = createEl("label", "", label);
+    labelEl.htmlFor = input.id;
+    const inputGroup = createEl("div", "settings-input-group");
+    inputGroup.append(input, createEl("span", "settings-suffix", suffix));
+
+    const row = createEl("div", "settings-row");
+    row.append(labelEl, inputGroup);
     grid.appendChild(row);
 
-    const input = row.querySelector("input");
     input.addEventListener("change", (e) => {
       const val = parseFloat(e.target.value);
       if (isNaN(val)) return;
