@@ -45,36 +45,45 @@ function saveThresholds(t) {
 let thresholds = loadThresholds();
 
 // Backyard geometry — typical Santa Monica courtyard
-const YARD_SIZE = 30; // feet, square yard
-const WALL_HEIGHT = 25; // feet, two-story buildings on all sides
+// Santa Monica's street grid (and so every lot line on it) is rotated ~40° from
+// true north: "north" on the grid, toward Montana Ave, is really northwest.
+// The yard is modeled in grid directions and the sun is rotated into that frame.
+const YARD_BEARING = 320; // compass bearing (degrees) of the yard's grid-north axis
+const YARD_WIDTH = 30; // feet, west wall to east wall
+const YARD_DEPTH = 30; // feet, south wall to north wall
+// feet, two-story buildings on all sides
+const WALL_HEIGHTS = { north: 25, south: 25, east: 25, west: 25 };
 const SUN_THRESHOLD = 0.25; // need 25% of yard sunlit
 const SHADOW_GRID = 20; // sample points per axis for shadow calculation
 
-// Solar position calculator using NOAA equations
+// Solar position calculator using NOAA's general solar position equations
+// (Spencer 1971 Fourier series for declination and equation of time)
 function solarPosition(date) {
   const rad = Math.PI / 180;
   const deg = 180 / Math.PI;
 
-  // Day-of-year approach for declination + equation of time
-  const start = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
-  const dayOfYear = Math.floor((date - start) / 86400000) + 1;
-  const B = ((360 / 365) * (dayOfYear - 81)) * rad;
+  // Fractional year (radians), including the time of day
+  const yearStart = Date.UTC(date.getUTCFullYear(), 0, 1);
+  const g = ((2 * Math.PI) / 365) * ((date - yearStart) / 86400000 - 0.5);
 
-  // Equation of time (minutes) — Spencer (1971)
-  const EoT =
-    9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);
+  // Equation of time (minutes)
+  const EoT = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) -
+    0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
 
-  // Solar declination (degrees)
-  const declination = 23.45 * Math.sin(((284 + dayOfYear) * 360 / 365) * rad);
+  // Solar declination (radians)
+  const declRad = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) -
+    0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g) -
+    0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
 
   // Solar time
   const utcHours =
     date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
   const solarTime = utcHours + LON / 15 + EoT / 60; // hours
-  const hourAngle = (solarTime - 12) * 15; // degrees
+  // Wrap to [-180°, 180°): from late afternoon on, the UTC clock has already
+  // rolled over to the next day, which would otherwise read as morning
+  const hourAngle = ((((solarTime - 12) * 15) % 360) + 540) % 360 - 180; // degrees
 
   const latRad = LAT * rad;
-  const declRad = declination * rad;
   const haRad = hourAngle * rad;
 
   // Solar elevation
@@ -94,13 +103,14 @@ function solarPosition(date) {
 }
 
 // Check if a single point in the yard receives direct sun
-// Yard coordinate system: x=0 is west wall, x=YARD_SIZE is east wall,
-// y=0 is south wall, y=YARD_SIZE is north wall
-function isPointSunlit(x, y, elevation, azimuth) {
+// Yard coordinate system (grid directions): x=0 is west wall, x=YARD_WIDTH is
+// east wall, y=0 is south wall, y=YARD_DEPTH is north wall.
+// yardAzimuth is the sun's azimuth relative to the yard's north axis.
+function isPointSunlit(x, y, elevation, yardAzimuth) {
   const rad = Math.PI / 180;
   const tanElev = Math.tan(elevation * rad);
-  const sinAz = Math.sin(azimuth * rad);
-  const cosAz = Math.cos(azimuth * rad);
+  const sinAz = Math.sin(yardAzimuth * rad);
+  const cosAz = Math.cos(yardAzimuth * rad);
 
   // Ray from (x, y, 0) toward sun direction (sinAz, cosAz, tanElev)
   // Check if ray intersects any wall below the wall's height
@@ -110,23 +120,23 @@ function isPointSunlit(x, y, elevation, azimuth) {
     const t = -y / cosAz;
     const xHit = x + t * sinAz;
     const zHit = t * tanElev;
-    if (xHit >= 0 && xHit <= YARD_SIZE && zHit <= WALL_HEIGHT) return false;
+    if (xHit >= 0 && xHit <= YARD_WIDTH && zHit <= WALL_HEIGHTS.south) return false;
   }
 
-  // North wall (y=YARD_SIZE): blocks when sun is north (cosAz > 0)
+  // North wall (y=YARD_DEPTH): blocks when sun is north (cosAz > 0)
   if (cosAz > 0) {
-    const t = (YARD_SIZE - y) / cosAz;
+    const t = (YARD_DEPTH - y) / cosAz;
     const xHit = x + t * sinAz;
     const zHit = t * tanElev;
-    if (xHit >= 0 && xHit <= YARD_SIZE && zHit <= WALL_HEIGHT) return false;
+    if (xHit >= 0 && xHit <= YARD_WIDTH && zHit <= WALL_HEIGHTS.north) return false;
   }
 
-  // East wall (x=YARD_SIZE): blocks when sun is east (sinAz > 0)
+  // East wall (x=YARD_WIDTH): blocks when sun is east (sinAz > 0)
   if (sinAz > 0) {
-    const t = (YARD_SIZE - x) / sinAz;
+    const t = (YARD_WIDTH - x) / sinAz;
     const yHit = y + t * cosAz;
     const zHit = t * tanElev;
-    if (yHit >= 0 && yHit <= YARD_SIZE && zHit <= WALL_HEIGHT) return false;
+    if (yHit >= 0 && yHit <= YARD_DEPTH && zHit <= WALL_HEIGHTS.east) return false;
   }
 
   // West wall (x=0): blocks when sun is west (sinAz < 0)
@@ -134,7 +144,7 @@ function isPointSunlit(x, y, elevation, azimuth) {
     const t = -x / sinAz;
     const yHit = y + t * cosAz;
     const zHit = t * tanElev;
-    if (yHit >= 0 && yHit <= YARD_SIZE && zHit <= WALL_HEIGHT) return false;
+    if (yHit >= 0 && yHit <= YARD_DEPTH && zHit <= WALL_HEIGHTS.west) return false;
   }
 
   return true;
@@ -145,15 +155,17 @@ function backyardSunFraction(date) {
   const { elevation, azimuth } = solarPosition(date);
   if (elevation <= 0) return { fraction: 0, elevation, azimuth };
 
+  const yardAzimuth = azimuth - YARD_BEARING;
   let sunlit = 0;
   const total = SHADOW_GRID * SHADOW_GRID;
-  const step = YARD_SIZE / SHADOW_GRID;
+  const xStep = YARD_WIDTH / SHADOW_GRID;
+  const yStep = YARD_DEPTH / SHADOW_GRID;
 
   for (let i = 0; i < SHADOW_GRID; i++) {
     for (let j = 0; j < SHADOW_GRID; j++) {
-      const x = (i + 0.5) * step;
-      const y = (j + 0.5) * step;
-      if (isPointSunlit(x, y, elevation, azimuth)) sunlit++;
+      const x = (i + 0.5) * xStep;
+      const y = (j + 0.5) * yStep;
+      if (isPointSunlit(x, y, elevation, yardAzimuth)) sunlit++;
     }
   }
 
@@ -311,16 +323,31 @@ function tideHeightAt(time, tideData) {
   return parseFloat(events[events.length - 1].height);
 }
 
-// Find joggable beach windows: daylight AND tide < 2 ft
-function findJoggableWindows(sunrise, sunset, tideData) {
-  const sunriseTime = new Date(sunrise).getTime();
-  const sunsetTime = new Date(sunset).getTime();
+// Civil twilight: until the sun is 6° below the horizon (roughly 25–30 min
+// before sunrise and after sunset here) there's plenty of light to run by
+const CIVIL_TWILIGHT_ELEVATION = -6; // degrees
+
+// First and last running light (civil dawn and dusk) around a sunrise/sunset
+function civilTwilight(sunrise, sunset) {
+  const STEP_MS = 60 * 1000;
+  const isLight = (t) => solarPosition(new Date(t)).elevation >= CIVIL_TWILIGHT_ELEVATION;
+  let dawn = new Date(sunrise).getTime();
+  while (isLight(dawn - STEP_MS)) dawn -= STEP_MS;
+  let dusk = new Date(sunset).getTime();
+  while (isLight(dusk + STEP_MS)) dusk += STEP_MS;
+  return { dawn: new Date(dawn), dusk: new Date(dusk) };
+}
+
+// Find joggable beach windows: enough light (dawn to dusk) AND tide < 2 ft
+function findJoggableWindows(dawn, dusk, tideData) {
+  const dawnTime = dawn.getTime();
+  const duskTime = dusk.getTime();
   const windows = [];
   let currentWindow = null;
   const STEP_MS = 10 * 60 * 1000; // 10-minute steps
   const MAX_TIDE = 2.0; // feet
 
-  for (let t = sunriseTime; t <= sunsetTime; t += STEP_MS) {
+  for (let t = dawnTime; t <= duskTime; t += STEP_MS) {
     const time = new Date(t);
     const height = tideHeightAt(time, tideData);
     const isJoggable = height !== null && height < MAX_TIDE;
@@ -373,12 +400,12 @@ function dayName(isoString) {
 function backyardSunStatus(now, sunrise, sunset) {
   const sunriseDate = new Date(sunrise);
   const sunsetDate = new Date(sunset);
-  if (now < sunriseDate) return { hasSun: false, fraction: 0, label: "Before sunrise", windows: findSunWindows(now) };
-  if (now > sunsetDate) return { hasSun: false, fraction: 0, label: "After sunset", windows: [] };
+  const windows = findSunWindows(now);
+  if (now < sunriseDate) return { hasSun: false, fraction: 0, label: "Before sunrise", windows };
+  if (now > sunsetDate) return { hasSun: false, fraction: 0, label: "After sunset", windows };
 
   const { fraction, elevation } = backyardSunFraction(now);
   const pct = Math.round(fraction * 100);
-  const windows = findSunWindows(now);
 
   if (fraction < 0.01) {
     return {
@@ -389,7 +416,11 @@ function backyardSunStatus(now, sunrise, sunset) {
     };
   }
 
-  const label = `Yes \u2014 ${pct}% of yard in direct sun`;
+  // Keep the label in line with hasSun so it never says "Yes" while the
+  // backyard card says there's no sun
+  const label = fraction >= SUN_THRESHOLD
+    ? `Yes \u2014 ${pct}% of yard in direct sun`
+    : `Barely \u2014 only ${pct}% of yard in direct sun`;
   return { hasSun: fraction >= SUN_THRESHOLD, fraction, label, windows };
 }
 
@@ -404,7 +435,7 @@ function layeringAdvice(feelsLike, wind) {
 }
 
 // Rate activities based on current conditions
-function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
+function rateActivities(weather, tideData, sunStatus, hourly, daily) {
   const feelsLike = weather.feelsLike;
   const wind = weather.wind;
   const gusts = weather.gusts;
@@ -420,14 +451,20 @@ function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
   {
     let rating, reason, tip;
     if (!sunStatus.hasSun) {
+      const nextSun = sunStatus.windows.find((w) => w.start > now);
+      const nextSunStr = nextSun
+        ? `Sun reaches the yard ${formatTime(nextSun.start)}\u2013${formatTime(nextSun.end)}.`
+        : "";
       if (feelsLike >= 65) {
         rating = "fair";
         reason = "No direct sun on the backyard right now, but it's warm enough.";
-        tip = "Grab a blanket if you're sitting still.";
+        tip = `Grab a blanket if you're sitting still. ${nextSunStr}`.trim();
       } else {
         rating = "poor";
         reason = `No direct sun, and it feels like ${displayTemp(feelsLike)} \u2014 it'll feel cold quickly.`;
-        tip = "Wait for morning sun tomorrow, or head to a sunnier spot.";
+        tip = nextSun
+          ? `${nextSunStr} Wait for it, or head to a sunnier spot.`
+          : "No more sun on the yard today \u2014 head to a sunnier spot.";
       }
     } else if (isRaining) {
       rating = "bad";
@@ -495,22 +532,32 @@ function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
     });
   }
 
-  // 3. Beach run — only during daylight with tide < 2 ft
+  // 3. Beach run — only while there's light (incl. twilight) with tide < 2 ft
   {
     let rating, reason, tip;
-    const joggableWindows = findJoggableWindows(sunrise, sunset, tideData);
+    const light = civilTwilight(daily.sunrise[0], daily.sunset[0]);
+    const joggableWindows = findJoggableWindows(light.dawn, light.dusk, tideData);
     const currentTide = tideHeightAt(now, tideData);
-    const isDaylight = now >= new Date(sunrise) && now <= new Date(sunset);
+    const hasLight = now >= light.dawn && now <= light.dusk;
     const tideOk = currentTide !== null && currentTide < 2.0;
-    const isJoggableNow = isDaylight && tideOk;
+    const isJoggableNow = hasLight && tideOk;
 
-    const windowStrs = joggableWindows.map((w) =>
+    const formatWindows = (windows) => windows.map((w) =>
       `${formatTime(w.start)}\u2013${formatTime(w.end)} (low ${w.minTide.toFixed(1)} ft)`
-    );
+    ).join(", ");
+    const windowStrs = formatWindows(joggableWindows);
 
-    if (joggableWindows.length === 0) {
+    if (now > light.dusk) {
+      const tomorrowLight = civilTwilight(daily.sunrise[1], daily.sunset[1]);
+      const tomorrowWindows = findJoggableWindows(tomorrowLight.dawn, tomorrowLight.dusk, tideData);
+      rating = "poor";
+      reason = "Too dark to run on the beach right now.";
+      tip = tomorrowWindows.length > 0
+        ? `Tomorrow\u2019s windows: ${formatWindows(tomorrowWindows)}`
+        : "";
+    } else if (joggableWindows.length === 0) {
       rating = "bad";
-      reason = "No joggable windows today \u2014 tide stays above 2 ft during daylight.";
+      reason = "No joggable windows today \u2014 tide stays above 2 ft while it's light out.";
       tip = "";
     } else if (isJoggableNow) {
       rating = (isRaining || isFoggy) ? "fair" : "great";
@@ -519,21 +566,20 @@ function rateActivities(weather, tideData, sunStatus, hourly, sunrise, sunset) {
         : isFoggy
         ? `Tide is ${currentTide.toFixed(1)} ft (runnable) but foggy \u2014 watch for other runners.`
         : `Tide is ${currentTide.toFixed(1)} ft \u2014 go now!`;
-      tip = `Today\u2019s windows: ${windowStrs.join(", ")}`;
-    } else if (!isDaylight) {
+      if (now > new Date(daily.sunset[0])) reason += ` Light lasts until about ${formatTime(light.dusk)}.`;
+      tip = `Today\u2019s windows: ${windowStrs}`;
+    } else if (!hasLight) {
       rating = "poor";
-      reason = "Too dark to run on the beach right now.";
-      tip = joggableWindows.length > 0
-        ? `Tomorrow\u2019s daylight windows: ${windowStrs.join(", ")}`
-        : "";
+      reason = `Too dark to run on the beach until about ${formatTime(light.dawn)}.`;
+      tip = `Today\u2019s windows: ${windowStrs}`;
     } else {
-      // Daylight but tide too high
+      // Light out but tide too high
       const nextWindow = joggableWindows.find((w) => w.start > now);
       rating = "poor";
       reason = `Tide is ${currentTide !== null ? currentTide.toFixed(1) : "?"} ft \u2014 too high (need < 2 ft).`;
       tip = nextWindow
         ? `Next window: ${formatTime(nextWindow.start)}\u2013${formatTime(nextWindow.end)}`
-        : `Today\u2019s windows: ${windowStrs.join(", ")}`;
+        : `Today\u2019s windows: ${windowStrs}`;
     }
     activities.push({
       icon: "\uD83C\uDFC3",
@@ -737,9 +783,8 @@ function renderActivities(activities) {
   const container = document.getElementById("activity-list");
   container.innerHTML = "";
 
-  const order = { great: 0, good: 1, fair: 2, poor: 3, bad: 4 };
-  activities.sort((a, b) => order[a.rating] - order[b.rating]);
-
+  // Cards stay in the fixed order rateActivities builds them in (not sorted by
+  // rating) so they don't shift around between visits
   for (const act of activities) {
     const div = document.createElement("div");
     div.className = `activity-item ${act.rating}`;
@@ -932,8 +977,7 @@ function reRenderActivities() {
     tideData,
     weather.sunStatus,
     hourly || [],
-    data.daily.sunrise[0],
-    data.daily.sunset[0]
+    data.daily
   );
   renderActivities(activities);
 }
