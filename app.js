@@ -57,6 +57,7 @@ const YARD_DEPTH = 30; // feet, south wall to north wall
 // feet, two-story buildings on all sides
 const WALL_HEIGHTS = { north: 25, south: 25, east: 25, west: 25 };
 const SUN_THRESHOLD = 0.25; // need 25% of yard sunlit
+const CLOUD_COVER_MAX = 80; // % cloud cover above which the sun is blocked
 const SHADOW_GRID = 20; // sample points per axis for shadow calculation
 
 // Solar position calculator using NOAA's general solar position equations
@@ -190,14 +191,21 @@ function daySunSamples(sunrise, sunset) {
   return samples;
 }
 
-// Find the day's sun windows where >= 25% of the yard is lit
+// Direct sun needs a clear or partly cloudy sky: overcast, the marine layer,
+// fog and rain all block it
+function isSkyClear(code, cloudCover) {
+  return code <= 2 && cloudCover < CLOUD_COVER_MAX;
+}
+
+// Find the day's sun windows where >= 25% of the yard is lit and, per the
+// hourly forecast passed as isSkyClearAt(time), the sky is clear
 // Returns array of { start, end, peakFraction, peakTime }
-function findSunWindows(sunrise, sunset) {
+function findSunWindows(sunrise, sunset, isSkyClearAt = () => true) {
   const windows = [];
   let currentWindow = null;
 
   for (const { time, fraction } of daySunSamples(sunrise, sunset)) {
-    if (fraction >= SUN_THRESHOLD) {
+    if (fraction >= SUN_THRESHOLD && isSkyClearAt(time)) {
       if (!currentWindow) {
         currentWindow = { start: time, end: time, peakFraction: fraction, peakTime: time };
       } else {
@@ -409,30 +417,37 @@ function dayName(unixSeconds) {
   return midday.toLocaleDateString("en-US", { weekday: "short", timeZone: TIME_ZONE });
 }
 
-// Determine if the sun is currently shining on the backyard using shadow geometry
-function backyardSunStatus(now, sunrise, sunset) {
-  const windows = findSunWindows(sunrise, sunset);
-  if (now < sunrise) return { hasSun: false, fraction: 0, label: "Before sunrise", windows };
-  if (now > sunset) return { hasSun: false, fraction: 0, label: "After sunset", windows };
+// Determine if the sun is currently shining on the backyard: shadow geometry
+// plus the current sky (skyClearNow) and the hourly forecast (isSkyClearAt)
+function backyardSunStatus(now, sunrise, sunset, skyClearNow, isSkyClearAt) {
+  const status = {
+    hasSun: false,
+    fraction: 0,
+    cloudy: false, // the yard would be sunny if not for the clouds
+    windows: findSunWindows(sunrise, sunset, isSkyClearAt),
+    clearSkyWindows: findSunWindows(sunrise, sunset),
+  };
+  if (now < sunrise) return { ...status, label: "Before sunrise" };
+  if (now > sunset) return { ...status, label: "After sunset" };
 
   const { fraction, elevation } = backyardSunFraction(now);
   const pct = Math.round(fraction * 100);
+  status.fraction = fraction;
+  status.hasSun = skyClearNow && fraction >= SUN_THRESHOLD;
+  status.cloudy = !skyClearNow && fraction >= SUN_THRESHOLD;
 
   if (fraction < 0.01) {
-    return {
-      hasSun: false,
-      fraction,
-      label: `No \u2014 buildings block sun (elev ${elevation.toFixed(0)}\u00B0)`,
-      windows,
-    };
+    status.label = `No \u2014 buildings block sun (elev ${elevation.toFixed(0)}\u00B0)`;
+  } else if (!skyClearNow) {
+    status.label = `No \u2014 clouds block the sun (${pct}% of yard would be lit)`;
+  } else if (fraction < SUN_THRESHOLD) {
+    // Keep the label in line with hasSun so it never says "Yes" while the
+    // backyard card says there's no sun
+    status.label = `Barely \u2014 only ${pct}% of yard in direct sun`;
+  } else {
+    status.label = `Yes \u2014 ${pct}% of yard in direct sun`;
   }
-
-  // Keep the label in line with hasSun so it never says "Yes" while the
-  // backyard card says there's no sun
-  const label = fraction >= SUN_THRESHOLD
-    ? `Yes \u2014 ${pct}% of yard in direct sun`
-    : `Barely \u2014 only ${pct}% of yard in direct sun`;
-  return { hasSun: fraction >= SUN_THRESHOLD, fraction, label, windows };
+  return status;
 }
 
 // Clothing recommendation based on feels-like temp and wind
@@ -461,26 +476,27 @@ function rateActivities(weather, tideData, sunStatus, data) {
   // 1. Backyard hangout
   {
     let rating, reason, tip;
-    if (!sunStatus.hasSun) {
+    if (isRaining) {
+      rating = "bad";
+      reason = "Rain expected \u2014 not great for the backyard.";
+      tip = "";
+    } else if (!sunStatus.hasSun) {
+      const noSun = sunStatus.cloudy ? "Clouds are blocking the sun" : "No direct sun on the backyard";
       const nextSun = sunStatus.windows.find((w) => w.start > now);
       const nextSunStr = nextSun
         ? `Sun reaches the yard ${formatTime(nextSun.start)}\u2013${formatTime(nextSun.end)}.`
         : "";
       if (feelsLike >= 65) {
         rating = "fair";
-        reason = "No direct sun on the backyard right now, but it's warm enough.";
+        reason = `${noSun} right now, but it's warm enough.`;
         tip = `Grab a blanket if you're sitting still. ${nextSunStr}`.trim();
       } else {
         rating = "poor";
-        reason = `No direct sun, and it feels like ${displayTemp(feelsLike)} \u2014 it'll feel cold quickly.`;
+        reason = `${noSun}, and it feels like ${displayTemp(feelsLike)} \u2014 it'll feel cold quickly.`;
         tip = nextSun
           ? `${nextSunStr} Wait for it, or head to a sunnier spot.`
           : "No more sun on the yard today \u2014 head to a sunnier spot.";
       }
-    } else if (isRaining) {
-      rating = "bad";
-      reason = "Rain expected \u2014 not great for the backyard.";
-      tip = "";
     } else if (feelsLike >= thresholds.backyardGreat && wind < 10) {
       rating = "great";
       reason = `Direct sun with ${displayTemp(feelsLike)} feels-like temp and light wind.`;
@@ -710,6 +726,7 @@ async function fetchWeather() {
       "relative_humidity_2m",
       "apparent_temperature",
       "weather_code",
+      "cloud_cover",
       "wind_speed_10m",
       "wind_gusts_10m",
       "uv_index",
@@ -717,6 +734,7 @@ async function fetchWeather() {
     hourly: [
       "temperature_2m",
       "weather_code",
+      "cloud_cover",
       "wind_speed_10m",
       "wind_gusts_10m",
       "apparent_temperature",
@@ -759,18 +777,25 @@ function renderCurrent(data) {
   document.getElementById("sunrise").textContent = formatTime(sunrise);
   document.getElementById("sunset").textContent = formatTime(sunset);
 
-  const sunStatus = backyardSunStatus(now, sunrise, sunset);
+  const isSkyClearAt = (time) => {
+    const h = hourlyAt(data.hourly, time);
+    return !h || isSkyClear(h.code, h.cloudCover);
+  };
+  const sunStatus = backyardSunStatus(
+    now, sunrise, sunset, isSkyClear(c.weather_code, c.cloud_cover), isSkyClearAt
+  );
   document.getElementById("sun-status").textContent = sunStatus.label;
 
   // Show sun windows for the yard
   const windowsEl = document.getElementById("sun-windows");
-  if (windowsEl && sunStatus.windows && sunStatus.windows.length > 0) {
-    const windowStrs = sunStatus.windows.map((w) => {
-      const pct = Math.round(w.peakFraction * 100);
-      return `${formatTime(w.start)}\u2013${formatTime(w.end)} (peak ${pct}%)`;
-    });
-    windowsEl.textContent = windowStrs.join(", ");
-  } else if (windowsEl) {
+  const formatSunWindows = (windows) => windows
+    .map((w) => `${formatTime(w.start)}\u2013${formatTime(w.end)} (peak ${Math.round(w.peakFraction * 100)}%)`)
+    .join(", ");
+  if (sunStatus.windows.length > 0) {
+    windowsEl.textContent = formatSunWindows(sunStatus.windows);
+  } else if (sunStatus.clearSkyWindows.length > 0) {
+    windowsEl.textContent = `None \u2014 clouds forecast over ${formatSunWindows(sunStatus.clearSkyWindows)}`;
+  } else {
     windowsEl.textContent = "No direct sun today";
   }
 
@@ -883,6 +908,7 @@ function forecastHour(hourly, i) {
     wind: hourly.wind_speed_10m[i],
     gusts: hourly.wind_gusts_10m[i],
     code: hourly.weather_code[i],
+    cloudCover: hourly.cloud_cover[i],
     feelsLike: hourly.apparent_temperature[i],
   };
 }
