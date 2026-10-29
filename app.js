@@ -435,7 +435,8 @@ function layeringAdvice(feelsLike, wind) {
 }
 
 // Rate activities based on current conditions
-function rateActivities(weather, tideData, sunStatus, hourly, daily) {
+function rateActivities(weather, tideData, sunStatus, data) {
+  const daily = data.daily;
   const feelsLike = weather.feelsLike;
   const wind = weather.wind;
   const gusts = weather.gusts;
@@ -443,7 +444,6 @@ function rateActivities(weather, tideData, sunStatus, hourly, daily) {
   const isFoggy = weather.code === 45 || weather.code === 48;
   const uv = weather.uv;
   const now = new Date();
-  const hour = parseInt(now.toLocaleTimeString("en-US", { hour: "numeric", hour12: false, timeZone: "America/Los_Angeles" }));
 
   const activities = [];
 
@@ -591,12 +591,16 @@ function rateActivities(weather, tideData, sunStatus, hourly, daily) {
     });
   }
 
-  // 4. Neighborhood walk (sun / sunset / late night)
+  // 4. Neighborhood walk (day / sunset / night)
   {
     let rating, reason, tip;
-    const isSunsetHour = hour >= 17 && hour <= 19;
-    const isLateNight = hour >= 21 || hour < 5;
-    const isDaytime = !isSunsetHour && !isLateNight;
+    const sunrise = new Date(daily.sunrise[0]);
+    const sunset = new Date(daily.sunset[0]);
+    // Sunset walk: from an hour before sunset until an hour after
+    const SUNSET_WALK_MS = 60 * 60 * 1000;
+    const isSunsetTime = Math.abs(now - sunset) <= SUNSET_WALK_MS;
+    const isDaytime = now >= sunrise && now < sunset - SUNSET_WALK_MS;
+    const isNight = !isSunsetTime && !isDaytime;
 
     // Wind is the key discomfort factor for this user
     const windDiscomfort = wind >= thresholds.walkWindMax || (feelsLike < 60 && wind >= 10);
@@ -609,13 +613,13 @@ function rateActivities(weather, tideData, sunStatus, hourly, daily) {
       rating = "great";
       reason = `Sunny walk weather \u2014 ${displayTemp(feelsLike)} with gentle breeze.`;
       tip = uv >= 6 ? "Wear a hat \u2014 UV is strong." : "";
-    } else if (isSunsetHour && !windDiscomfort && feelsLike >= thresholds.sunsetGreat) {
+    } else if (isSunsetTime && !windDiscomfort && feelsLike >= thresholds.sunsetGreat) {
       rating = "great";
       reason = "Perfect sunset walk conditions \u2014 comfortable temp and calm wind.";
       tip = "Bring a light jacket for after the sun dips.";
-    } else if (isLateNight && !windDiscomfort && feelsLike >= 55) {
+    } else if (isNight && !windDiscomfort && feelsLike >= 55) {
       rating = "good";
-      reason = `Late night feels like ${displayTemp(feelsLike)} with tolerable wind.`;
+      reason = `Dark out, but feels like ${displayTemp(feelsLike)} with tolerable wind.`;
       tip = "A jacket will keep you comfortable.";
     } else if (windDiscomfort) {
       rating = feelsLike < 55 ? "bad" : "poor";
@@ -628,7 +632,7 @@ function rateActivities(weather, tideData, sunStatus, hourly, daily) {
     } else {
       rating = "fair";
       reason = `Feels like ${displayTemp(feelsLike)} \u2014 manageable with a layer.`;
-      tip = isSunsetHour ? "Bring a jacket \u2014 it'll cool off fast after sunset." : "";
+      tip = isSunsetTime ? "Bring a jacket \u2014 it'll cool off fast after sunset." : "";
     }
 
     if (isFoggy && rating !== "bad") {
@@ -640,9 +644,9 @@ function rateActivities(weather, tideData, sunStatus, hourly, daily) {
     if (tip) tip += ` Wear: ${walkLayer}.`;
     else tip = `Wear: ${walkLayer}.`;
 
-    const walkType = isLateNight ? "Late Night Walk" : isSunsetHour ? "Sunset Walk" : "Neighborhood Walk";
+    const walkType = isNight ? "Night Walk" : isSunsetTime ? "Sunset Walk" : "Neighborhood Walk";
     activities.push({
-      icon: isLateNight ? "\uD83C\uDF19" : isSunsetHour ? "\uD83C\uDF05" : "\uD83D\uDEB6",
+      icon: isNight ? "\uD83C\uDF19" : isSunsetTime ? "\uD83C\uDF05" : "\uD83D\uDEB6",
       name: walkType,
       rating,
       reason,
@@ -650,13 +654,9 @@ function rateActivities(weather, tideData, sunStatus, hourly, daily) {
     });
 
     // If it's daytime, also show what sunset walk will be like
-    if (isDaytime && hourly.length > 0) {
-      const sunsetIdx = hourly.findIndex((h) => {
-        const hHour = new Date(h.time).getHours();
-        return hHour >= 17 && hHour <= 18;
-      });
-      if (sunsetIdx >= 0) {
-        const sh = hourly[sunsetIdx];
+    if (isDaytime) {
+      const sh = hourlyAt(data.hourly, sunset);
+      if (sh) {
         const sunsetFeels = sh.feelsLike;
         const sunsetWindBad = sh.wind >= thresholds.walkWindMax || (sunsetFeels < 60 && sh.wind >= 10);
         let sRating, sReason, sTip;
@@ -861,6 +861,24 @@ function renderTides(tideData) {
   document.getElementById("tides").hidden = false;
 }
 
+// One hour of the hourly forecast
+function forecastHour(hourly, i) {
+  return {
+    time: hourly.time[i],
+    temperature: hourly.temperature_2m[i],
+    wind: hourly.wind_speed_10m[i],
+    gusts: hourly.wind_gusts_10m[i],
+    code: hourly.weather_code[i],
+    feelsLike: hourly.apparent_temperature[i],
+  };
+}
+
+// Forecast for the hour nearest `time`, or null if it's outside the forecast
+function hourlyAt(hourly, time) {
+  const i = hourly.time.findIndex((t) => Math.abs(new Date(t) - time) <= 30 * 60 * 1000);
+  return i < 0 ? null : forecastHour(hourly, i);
+}
+
 function renderHourly(data) {
   const container = document.getElementById("hourly-scroll");
   container.innerHTML = "";
@@ -872,14 +890,7 @@ function renderHourly(data) {
 
   const hours = [];
   for (let i = startIdx; i < Math.min(startIdx + 12, data.hourly.time.length); i++) {
-    hours.push({
-      time: data.hourly.time[i],
-      temperature: data.hourly.temperature_2m[i],
-      wind: data.hourly.wind_speed_10m[i],
-      gusts: data.hourly.wind_gusts_10m[i],
-      code: data.hourly.weather_code[i],
-      feelsLike: data.hourly.apparent_temperature[i],
-    });
+    hours.push(forecastHour(data.hourly, i));
   }
 
   for (const h of hours) {
@@ -896,7 +907,6 @@ function renderHourly(data) {
   }
 
   document.getElementById("hourly").hidden = false;
-  return hours;
 }
 
 function renderWeekly(data) {
@@ -958,12 +968,12 @@ function updateLastUpdated() {
 
 function renderAll(data, tideData) {
   const weather = renderCurrent(data);
-  const hourly = renderHourly(data);
+  renderHourly(data);
 
   renderTides(tideData);
   renderWeekly(data);
 
-  lastRenderState = { weather, hourly, tideData, data };
+  lastRenderState = { weather, tideData, data };
 
   reRenderActivities();
   updateLastUpdated();
@@ -971,14 +981,8 @@ function renderAll(data, tideData) {
 
 function reRenderActivities() {
   if (!lastRenderState) return;
-  const { weather, hourly, tideData, data } = lastRenderState;
-  const activities = rateActivities(
-    weather,
-    tideData,
-    weather.sunStatus,
-    hourly || [],
-    data.daily
-  );
+  const { weather, tideData, data } = lastRenderState;
+  const activities = rateActivities(weather, tideData, weather.sunStatus, data);
   renderActivities(activities);
 }
 
